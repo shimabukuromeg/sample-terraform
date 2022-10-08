@@ -15,7 +15,7 @@ provider "google" {
 }
 
 module "sample_instance" {
-  source = "./module"
+  source = "./modules/app"
 
   project      = var.project
   service_name = "sample-service"
