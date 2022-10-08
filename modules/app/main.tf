@@ -1,16 +1,6 @@
 # 仮想マシンインスタンス（google_compute_instance）を作成するモジュール
 # 属性にvariable、 variableを利用して組み立てたlocals、インターポレーションでvariableを埋め込んだ文字列を利用
 
-terraform {
-  required_version = "1.3.0"
-  required_providers {
-    google = {
-      source  = "hashicorp/google"
-      version = "4.32.0"
-    }
-  }
-}
-
 # localsは、リソース内で利用する入出力に関与しない変数
 locals {
   common_labels = {
