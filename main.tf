@@ -22,31 +22,80 @@ provider "google-beta" {
   project = var.project_id
 }
 
-# Cloud Run service and permissions
+##############################################################
+###  Cloud Run service and permissions
+##############################################################
 
-resource "google_cloud_run_service" "default" {
-  name     = var.cloud_run_service
+###########################
+# Cloud Run NestJS
+###########################
+
+resource "google_cloud_run_service" "api" {
+  name     = "example-api"
   location = var.region
   project  = var.project_id
 
   template {
     spec {
       containers {
-        image = "gcr.io/cloudrun/hello"
+        image = "asia-northeast1-docker.pkg.dev/terraform-example-363422/meg-example/nestjs:latest"
+        ports {
+          container_port = 3005
+          name           = "http1"
+        }
       }
     }
   }
 }
 
-resource "google_cloud_run_service_iam_member" "member" {
-  location = google_cloud_run_service.default.location
-  project  = google_cloud_run_service.default.project
-  service  = google_cloud_run_service.default.name
+resource "google_cloud_run_service_iam_member" "member-api" {
+  location = google_cloud_run_service.api.location
+  project  = google_cloud_run_service.api.project
+  service  = google_cloud_run_service.api.name
   role     = "roles/run.invoker"
   member   = "allUsers"
 }
 
-# Load Balancing resources
+###########################
+# Cloud Run Remix
+###########################
+resource "google_cloud_run_service" "app" {
+  name     = "example-app"
+  location = var.region
+  project  = var.project_id
+
+  template {
+    spec {
+      containers {
+        image = "asia-northeast1-docker.pkg.dev/terraform-example-363422/meg-example/remix:latest"
+        ports {
+          container_port = 3000
+          name           = "http1"
+        }
+        env {
+          name  = "SERVER_HOST"
+          value = "https://api.example.shimabukuromeg.dev"
+        }
+      }
+    }
+  }
+
+  depends_on = [
+    google_cloud_run_service.api
+  ]
+}
+
+resource "google_cloud_run_service_iam_member" "member-app" {
+  location = google_cloud_run_service.app.location
+  project  = google_cloud_run_service.app.project
+  service  = google_cloud_run_service.app.name
+  role     = "roles/run.invoker"
+  member   = "allUsers"
+}
+
+##############################################################
+###  Load Balancing resources
+##############################################################
 
 # IPアドレス
 resource "google_compute_global_address" "default" {
@@ -62,25 +111,99 @@ resource "google_compute_global_forwarding_rule" "default" {
   ip_address = google_compute_global_address.default.address
 }
 
-# バックエンドの構成
-resource "google_compute_backend_service" "default" {
-  name = "${var.name}-backend"
+########################
+# バックエンドの構成 NestJS
+########################
+resource "google_compute_backend_service" "api" {
+  name = "${var.name}-api"
 
   protocol    = "HTTP"
   port_name   = "http"
   timeout_sec = 30
 
   backend {
-    group = google_compute_region_network_endpoint_group.cloudrun_neg.id
+    group = google_compute_region_network_endpoint_group.cloudrun_neg_api.id
   }
 }
 
+# NEG
+resource "google_compute_region_network_endpoint_group" "cloudrun_neg_api" {
+  provider              = google-beta
+  name                  = "api-neg"
+  network_endpoint_type = "SERVERLESS"
+  region                = var.region
+  cloud_run {
+    service = google_cloud_run_service.api.name
+  }
+}
+
+########################
+# バックエンドの構成 Remix
+########################
+resource "google_compute_backend_service" "app" {
+  name = "${var.name}-app"
+
+  protocol    = "HTTP"
+  port_name   = "http"
+  timeout_sec = 30
+
+  backend {
+    group = google_compute_region_network_endpoint_group.cloudrun_neg_app.id
+  }
+}
+
+# NEG
+resource "google_compute_region_network_endpoint_group" "cloudrun_neg_app" {
+  provider              = google-beta
+  name                  = "app-neg"
+  network_endpoint_type = "SERVERLESS"
+  region                = var.region
+  cloud_run {
+    service = google_cloud_run_service.app.name
+  }
+}
+
+########################
 # ホストとパスのルール
+########################
 resource "google_compute_url_map" "default" {
   name = "${var.name}-urlmap"
 
-  default_service = google_compute_backend_service.default.id
+  default_service = google_compute_backend_service.app.id
+
+  ##############
+  # NestJSのルール
+  ##############
+  host_rule {
+    hosts        = ["app.example.shimabukuromeg.dev"]
+    path_matcher = "app"
+  }
+
+  path_matcher {
+    name            = "app"
+    default_service = google_compute_backend_service.app.id
+  }
+
+  ##############
+  # Remixのルール
+  ##############
+  host_rule {
+    hosts        = ["api.example.shimabukuromeg.dev"]
+    path_matcher = "api"
+  }
+
+  path_matcher {
+    name            = "api"
+    default_service = google_compute_backend_service.api.id
+  }
+
+  test {
+    service = google_compute_backend_service.app.id
+    host    = "app.example.shimabukuromeg.dev"
+    path    = "/"
+  }
 }
+
 
 ##############################################################
 ###  証明書作成
@@ -97,38 +220,17 @@ module "certificate" {
   }
 }
 
-# マネージド証明書
-# resource "google_compute_managed_ssl_certificate" "default" {
-#   provider = google-beta
-
-#   name = "${var.name}-cert"
-#   managed {
-#     domains = ["${var.domain}"]
-#   }
-# }
-
 # フロントエンドの構成 のどこか？
 resource "google_compute_target_https_proxy" "default" {
   name = "${var.name}-https-proxy"
 
   url_map         = google_compute_url_map.default.id
   certificate_map = "//certificatemanager.googleapis.com/${module.certificate.certificate.id}"
-  # ssl_certificates = [google_compute_managed_ssl_certificate.default.id]
 }
 
-# バックエンドの構成 / バックエンド サービス
-resource "google_compute_region_network_endpoint_group" "cloudrun_neg" {
-  provider              = google-beta
-  name                  = "${var.name}-neg"
-  network_endpoint_type = "SERVERLESS"
-  region                = var.region
-  cloud_run {
-    service = google_cloud_run_service.default.name
-  }
-}
-
+################################
 # HTTP-to-HTTPS resources
-
+################################
 resource "google_compute_url_map" "https_redirect" {
   name = "${var.name}-https-redirect"
 
@@ -152,10 +254,15 @@ resource "google_compute_global_forwarding_rule" "https_redirect" {
   ip_address = google_compute_global_address.default.address
 }
 
+###############
 # Outputs
+###############
+output "cloud_run_api_url" {
+  value = element(google_cloud_run_service.api.status, 0).url
+}
 
-output "cloud_run_url" {
-  value = element(google_cloud_run_service.default.status, 0).url
+output "cloud_run_app_url" {
+  value = element(google_cloud_run_service.app.status, 0).url
 }
 
 output "load_balancer_ip" {
