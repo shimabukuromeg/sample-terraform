@@ -82,7 +82,9 @@ resource "google_compute_url_map" "default" {
   default_service = google_compute_backend_service.default.id
 }
 
-## 証明書
+##############################################################
+###  証明書作成
+##############################################################
 module "certificate" {
   source = "./certificate"
 
