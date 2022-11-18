@@ -23,6 +23,34 @@ provider "google-beta" {
 }
 
 ##############################################################
+###  ネットワーク
+##############################################################
+module "sample-network" {
+  source = "./network"
+
+  project_id = var.project_id
+  region     = var.region
+}
+
+##############################################################
+###  Cloud SQL
+##############################################################z
+module "sample-sql" {
+  source = "./sql"
+
+  project_id  = var.project_id
+  region      = var.region
+  name_prefix = "sample"
+
+  db-network-id = module.sample-network.network.id
+  db-tier       = "db-f1-micro"
+  db-databases = [
+    "sample_db"
+  ]
+  vpc-subnet-name = module.sample-network.vpc-access-connector-link.name
+}
+
+##############################################################
 ###  Cloud Run service and permissions
 ##############################################################
 
@@ -45,6 +73,13 @@ resource "google_cloud_run_service" "api" {
         }
       }
     }
+    metadata {
+      annotations = {
+        "run.googleapis.com/vpc-access-connector" = module.sample-sql.vpcconn-connection-name
+        "run.googleapis.com/vpc-access-egress"    = "private-ranges-only"
+        "run.googleapis.com/cloudsql-instances"   = module.sample-sql.db-connection-name
+      }
+    }
   }
 }
 
@@ -52,43 +87,6 @@ resource "google_cloud_run_service_iam_member" "member-api" {
   location = google_cloud_run_service.api.location
   project  = google_cloud_run_service.api.project
   service  = google_cloud_run_service.api.name
-  role     = "roles/run.invoker"
-  member   = "allUsers"
-}
-
-###########################
-# Cloud Run Remix
-###########################
-resource "google_cloud_run_service" "app" {
-  name     = "example-app"
-  location = var.region
-  project  = var.project_id
-
-  template {
-    spec {
-      containers {
-        image = "asia-northeast1-docker.pkg.dev/terraform-example-363422/meg-example/remix:latest"
-        ports {
-          container_port = 3000
-          name           = "http1"
-        }
-        env {
-          name  = "SERVER_HOST"
-          value = "https://api.example.shimabukuromeg.dev"
-        }
-      }
-    }
-  }
-
-  depends_on = [
-    google_cloud_run_service.api
-  ]
-}
-
-resource "google_cloud_run_service_iam_member" "member-app" {
-  location = google_cloud_run_service.app.location
-  project  = google_cloud_run_service.app.project
-  service  = google_cloud_run_service.app.name
   role     = "roles/run.invoker"
   member   = "allUsers"
 }
@@ -138,54 +136,15 @@ resource "google_compute_region_network_endpoint_group" "cloudrun_neg_api" {
 }
 
 ########################
-# バックエンドの構成 Remix
-########################
-resource "google_compute_backend_service" "app" {
-  name = "${var.name}-app"
-
-  protocol    = "HTTP"
-  port_name   = "http"
-  timeout_sec = 30
-
-  backend {
-    group = google_compute_region_network_endpoint_group.cloudrun_neg_app.id
-  }
-}
-
-# NEG
-resource "google_compute_region_network_endpoint_group" "cloudrun_neg_app" {
-  provider              = google-beta
-  name                  = "app-neg"
-  network_endpoint_type = "SERVERLESS"
-  region                = var.region
-  cloud_run {
-    service = google_cloud_run_service.app.name
-  }
-}
-
-########################
 # ホストとパスのルール
 ########################
 resource "google_compute_url_map" "default" {
   name = "${var.name}-urlmap"
 
-  default_service = google_compute_backend_service.app.id
+  default_service = google_compute_backend_service.api.id
 
   ##############
   # NestJSのルール
-  ##############
-  host_rule {
-    hosts        = ["app.example.shimabukuromeg.dev"]
-    path_matcher = "app"
-  }
-
-  path_matcher {
-    name            = "app"
-    default_service = google_compute_backend_service.app.id
-  }
-
-  ##############
-  # Remixのルール
   ##############
   host_rule {
     hosts        = ["api.example.shimabukuromeg.dev"]
@@ -198,8 +157,8 @@ resource "google_compute_url_map" "default" {
   }
 
   test {
-    service = google_compute_backend_service.app.id
-    host    = "app.example.shimabukuromeg.dev"
+    service = google_compute_backend_service.api.id
+    host    = "api.example.shimabukuromeg.dev"
     path    = "/"
   }
 }
@@ -259,10 +218,6 @@ resource "google_compute_global_forwarding_rule" "https_redirect" {
 ###############
 output "cloud_run_api_url" {
   value = element(google_cloud_run_service.api.status, 0).url
-}
-
-output "cloud_run_app_url" {
-  value = element(google_cloud_run_service.app.status, 0).url
 }
 
 output "load_balancer_ip" {
