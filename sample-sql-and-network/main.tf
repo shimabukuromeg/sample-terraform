@@ -1,3 +1,22 @@
+##############################################################
+###  ネットワーク
+##############################################################
+# VPC作成
+resource "google_compute_network" "peering_network" {
+  name                    = "private-network"
+  auto_create_subnetworks = "false"
+}
+
+# VPCコネクタ専用
+resource "google_compute_subnetwork" "peering-network-subnet" {
+  project       = var.project_id
+  name          = "peering-network-subnet"
+  description   = "peering-network-subnet"
+  ip_cidr_range = "10.8.0.0/28" // デフォルトサブネットの外で/28確保
+  region        = var.region
+  network       = google_compute_network.peering_network.id
+}
+
 # プライベートIPでアクセスするための設定（APIの有効化）
 resource "google_project_service" "network" {
   project = var.project_id
@@ -11,13 +30,13 @@ resource "google_compute_global_address" "vpc_private_ip" {
   purpose       = "VPC_PEERING"
   address_type  = "INTERNAL"
   prefix_length = 16
-  network       = var.db-network-id
+  network       = google_compute_network.peering_network.id
 }
 
 
 # Private IP -> VPC
 resource "google_service_networking_connection" "vpc_conn" {
-  network                 = var.db-network-id
+  network                 = google_compute_network.peering_network.id
   service                 = "servicenetworking.googleapis.com"
   reserved_peering_ranges = [google_compute_global_address.vpc_private_ip.name]
   depends_on = [
@@ -45,7 +64,7 @@ resource "google_sql_database_instance" "default" {
 
     ip_configuration {
       ipv4_enabled    = true
-      private_network = var.db-network-id
+      private_network = google_compute_network.peering_network.id
     }
 
     database_flags {
@@ -58,6 +77,35 @@ resource "google_sql_database_instance" "default" {
     google_service_networking_connection.vpc_conn
   ]
 }
+
+######################################################
+#### サーバーレス VPC コネクタ
+######################################################
+
+resource "google_project_service" "vpcaccess" {
+  project = var.project_id
+  service = "vpcaccess.googleapis.com"
+
+  timeouts {
+    create = "30m"
+    update = "40m"
+  }
+}
+
+resource "google_vpc_access_connector" "vpcaccess" {
+  provider     = google-beta
+  region       = var.region
+  project      = var.project_id
+  name         = "vpc-con-middleware"
+  machine_type = "e2-micro"
+  subnet {
+    name = google_compute_subnetwork.peering-network-subnet.name
+  }
+  depends_on = [
+    google_project_service.vpcaccess
+  ]
+}
+
 
 ######################################################
 ### IAMユーザー, サービスアカウント

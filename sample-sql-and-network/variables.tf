@@ -25,17 +25,7 @@ variable "db-databases" {
   description = "作成するデータベース名"
 }
 
-variable "db-network-id" {
-  type        = string
-  description = "Cloud SQL for PostgreSQLのインスタンスに許可する`google_compute_network.id`"
-}
-
 variable "region" {
   type        = string
   description = "GCPリージョン"
-}
-
-variable "vpc-subnet-name" {
-  type        = string
-  description = "Redisに接続するためのVPCコネクターを作るredis-network-idのサブネットのname"
 }

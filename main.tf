@@ -1,19 +1,3 @@
-/**
- * Copyright 2020 Google LLC
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 provider "google" {
   project = var.project_id
 }
@@ -23,32 +7,20 @@ provider "google-beta" {
 }
 
 ##############################################################
-###  ネットワーク
-##############################################################
-module "sample-network" {
-  source = "./network"
-
-  project_id = var.project_id
-  region     = var.region
-}
-
-##############################################################
 ###  Cloud SQL
 ##############################################################z
-module "sample-sql" {
-  source = "./sql"
+# module "sample-sql-and-network" {
+#   source = "./sample-sql-and-network"
 
-  project_id  = var.project_id
-  region      = var.region
-  name_prefix = "sample"
+#   project_id  = var.project_id
+#   region      = var.region
+#   name_prefix = "sample"
 
-  db-network-id = module.sample-network.network.id
-  db-tier       = "db-f1-micro"
-  db-databases = [
-    "sample_db"
-  ]
-  vpc-subnet-name = module.sample-network.vpc-access-connector-link.name
-}
+#   db-tier = "db-f1-micro"
+#   db-databases = [
+#     "sample_db"
+#   ]
+# }
 
 ##############################################################
 ###  Cloud Run service and permissions
@@ -66,20 +38,22 @@ resource "google_cloud_run_service" "api" {
   template {
     spec {
       containers {
-        image = "asia-northeast1-docker.pkg.dev/terraform-example-363422/meg-example/nestjs:latest"
-        ports {
-          container_port = 3005
-          name           = "http1"
-        }
+        # image = "asia-northeast1-docker.pkg.dev/terraform-example-363422/meg-example/nestjs:latest"
+        image = "us-docker.pkg.dev/cloudrun/container/hello"
+
+        # ports {
+        #   container_port = 3005
+        #   name           = "http1"
+        # }
       }
     }
-    metadata {
-      annotations = {
-        "run.googleapis.com/vpc-access-connector" = module.sample-sql.vpcconn-connection-name
-        "run.googleapis.com/vpc-access-egress"    = "private-ranges-only"
-        "run.googleapis.com/cloudsql-instances"   = module.sample-sql.db-connection-name
-      }
-    }
+    # metadata {
+    #   annotations = {
+    #     "run.googleapis.com/vpc-access-connector" = module.sample-sql-and-network.vpcconn-connection-name
+    #     "run.googleapis.com/vpc-access-egress"    = "private-ranges-only"
+    #     "run.googleapis.com/cloudsql-instances"   = module.sample-sql-and-network.db-connection-name
+    #   }
+    # }
   }
 }
 
@@ -95,7 +69,7 @@ resource "google_cloud_run_service_iam_member" "member-api" {
 ###  Load Balancing resources
 ##############################################################
 
-# IPアドレス
+# IPアドレスを作成する
 resource "google_compute_global_address" "default" {
   name = "${var.name}-address"
 }
@@ -213,6 +187,88 @@ resource "google_compute_global_forwarding_rule" "https_redirect" {
   ip_address = google_compute_global_address.default.address
 }
 
+## workloadの設定 ##
+# module "identity_pool_sample" {
+#   source     = "./iam/identity_pool"
+#   project_id = var.project_id
+#   pool_id    = "deploy-tools"
+# }
+
+# for GitHub Actions
+# GitHubから各デプロイ用SAになれるようにする
+# module "github_oidc_sample" {
+#   source     = "./iam/identity_pool_user"
+#   pool_id    = module.identity_pool_sample.workload_identity_provider.name
+#   sa_id      = google_service_account.sample-deploy.id
+#   repository = "shimabukuromeg/nestjs-prisma-github-actions"
+# }
+
+resource "google_service_account" "sample-deploy" {
+  account_id   = "sample-deploy"
+  display_name = "GitHubActions(sample)"
+  project      = var.project_id
+}
+
+##############################################################
+###  権限の設定
+##############################################################
+
+###############
+# デプロイ用 SA
+###############
+
+## CloudRun ##
+data "google_project" "run" {
+  project_id = var.project_id
+}
+resource "google_project_iam_member" "sample-deploy-cloudrun-roles" {
+  for_each = {
+    // docker push
+    "roles/artifactregistry.writer" = var.project_id,
+    // gcloud run deploy
+    "roles/run.admin"              = data.google_project.run.project_id,
+    "roles/iam.serviceAccountUser" = data.google_project.run.project_id
+  }
+  project = each.value
+  role    = each.key
+  member  = "serviceAccount:${google_service_account.sample-deploy.email}"
+}
+
+###############
+# 実行用 SA
+###############
+resource "google_service_account" "sample-run-sa" {
+  account_id   = "sample-run"
+  display_name = "sample run"
+  project      = data.google_project.run.project_id
+}
+
+resource "google_project_iam_member" "sample-run-cloudrun-roles" {
+  for_each = toset([
+    // CloudSQL
+    "roles/cloudsql.client",
+    // SecretManager: 実行時環境変数の読み込み(berglas経由)
+    "roles/secretmanager.secretAccessor"
+  ])
+  project = data.google_project.run.project_id
+  role    = each.key
+  member  = "serviceAccount:${google_service_account.sample-run-sa.email}"
+}
+
+##############################
+# サービスエージェント用SA
+##############################
+locals {
+  cloudrun-service-agent-email = "service-${data.google_project.run.number}@serverless-robot-prod.iam.gserviceaccount.com"
+}
+
+# サービスエージェントがDockerからクローンできるようにする
+resource "google_project_iam_member" "sample-agent-role" {
+  project = var.project_id
+  role    = "roles/artifactregistry.reader"
+  member  = "serviceAccount:${local.cloudrun-service-agent-email}"
+}
+
 ###############
 # Outputs
 ###############
@@ -223,3 +279,7 @@ output "cloud_run_api_url" {
 output "load_balancer_ip" {
   value = google_compute_global_address.default.address
 }
+
+# output "db_admin_user" {
+#   value = module.sample-sql-and-network.db-private-ip
+# }
